@@ -518,7 +518,7 @@ def execute_sql_query(query: str) -> str:
 
         if len(rows) > MAX_ROWS:
             result += f"\n... and {len(rows) - MAX_ROWS} more rows"
-
+        
         return result
 
     except Exception as error:

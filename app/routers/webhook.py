@@ -4,6 +4,15 @@ from datetime import datetime
 
 from app.database import get_session, RawMessage
 from app.schemas import RawMessageBatchIn
+from app.metrics import (
+    webhook_batches_total,
+    webhook_messages_ingested_total,
+    webhook_duplicates_skipped_total,
+    webhook_commit_failures_total,
+    webhook_timestamp_unparsed_total,
+    webhook_batch_size,
+)
+
 
 
 def _parse_timestamp(ts: str) -> str:
@@ -36,7 +45,8 @@ def _parse_timestamp(ts: str) -> str:
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         pass
-
+    
+    webhook_timestamp_unparsed_total.inc()
     return ts  # Unrecognised — store as-is
 
 router = APIRouter(prefix="/webhook/extension", tags=["webhook"])
@@ -47,6 +57,9 @@ def ingest_batch(payload: RawMessageBatchIn, db: Session = Depends(get_session))
     Receive a batch of WhatsApp messages from the Chrome extension.
     Deduplication is done in memory rather than with one DB query per message.
     """
+    webhook_batches_total.inc()
+    webhook_batch_size.observe(len(payload.messages))
+    
     if not payload.messages:
         return {"status": "received", "count": 0}
 
@@ -84,11 +97,13 @@ def ingest_batch(payload: RawMessageBatchIn, db: Session = Depends(get_session))
         # Track it locally so duplicates within the same batch are also caught.
         seen_signatures.add(signature)
         inserted_count += 1
+        webhook_messages_ingested_total.labels(chat_name=msg_data.chat_name).inc()
 
     try:
         db.commit()
     except Exception as e:
         db.rollback()
+        webhook_commit_failures_total.inc()
         print(f"Webhook: Database commit failed, rolled back: {e}")
         raise HTTPException(status_code=500, detail="Database insertion failed.")
 
