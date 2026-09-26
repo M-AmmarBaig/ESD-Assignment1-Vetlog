@@ -24,8 +24,8 @@ dist/
 build/
 
 # Database
-data/
 *.db
+*.db-*
 *.sqlite3
 
 # Logs & Observability
