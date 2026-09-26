@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt as jose_jwt
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import JWT_ALGORITHM, JWT_SECRET_KEY
 from app.database import Users, get_session
 from app.schemas import AuthResponse, LoginRequest, UserRegisterRequest
+from app.logger import logger
 
 security_scheme = HTTPBearer()
 
@@ -35,21 +36,27 @@ def get_current_user(
         )
         user_id = int(payload.get("sub"))
     except Exception:
+        logger.warning("Authentication failed: Invalid or expired JWT token")
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = db.query(Users).filter(Users.id == user_id).first()
     if not user:
+        logger.warning(f"Authentication failed: Token valid but user_id {user_id} not found in DB")
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
 
 @router.post("/login")
-def login(payload: LoginRequest, db: Session = Depends(get_session)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_session)):
+    client_ip = request.client.host if request.client else "unknown"
     user = db.query(Users).filter(Users.username == payload.username).first()
     if not user or not bcrypt.checkpw(
         payload.password.encode("utf-8"), user.password.encode("utf-8")
     ):
+        logger.warning(f"SECURITY ALERT: Failed login attempt for username '{payload.username}' from IP {client_ip}")
         raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+    logger.info(f"Successful login for user '{payload.username}' from IP {client_ip}")
     return AuthResponse(
         token=create_jwt(user),
         user_id=user.id,
@@ -59,9 +66,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_session)):
 
 
 @router.post("/register")
-def register(payload: UserRegisterRequest, db: Session = Depends(get_session)):
+def register(payload: UserRegisterRequest, request: Request, db: Session = Depends(get_session)):
+    client_ip = request.client.host if request.client else "unknown"
     user_exists = db.query(Users).filter(Users.username == payload.username).first()
     if user_exists:
+        logger.warning(f"Registration failed: Username '{payload.username}' already exists. Attempt from IP {client_ip}")
         raise HTTPException(status_code=400, detail="Username already exists")
 
     hashed_password = bcrypt.hashpw(payload.password.encode("utf-8"), bcrypt.gensalt())
@@ -72,9 +81,11 @@ def register(payload: UserRegisterRequest, db: Session = Depends(get_session)):
     )
     db.add(new_user)
     db.commit()
+    
+    logger.info(f"New user registered: '{payload.username}' from IP {client_ip}")
     return AuthResponse(
-        token=create_jwt(new_user),  # JWT comes next
-        user_id=new_user.id,  # new_user is available after db.add + db.commit
+        token=create_jwt(new_user),
+        user_id=new_user.id,
         username=payload.username,
         display_name=payload.display_name,
     )

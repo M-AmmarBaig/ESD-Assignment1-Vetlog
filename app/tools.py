@@ -3,6 +3,8 @@ import io
 import os
 import re
 import sqlite3
+import time
+import functools
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -10,6 +12,32 @@ import sqlglot
 from langchain_core.tools import tool
 
 from app.config import DATABASE_URL
+from app.metrics import tool_calls_total, tool_call_duration_seconds, reports_generated_total
+
+
+from app.logger import logger
+
+def instrument_tool(tool_name):
+    """Decorator to automatically record Prometheus metrics and logs for tool execution."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            tool_calls_total.labels(tool_name=tool_name).inc()
+            logger.info(f"AI Agent calling tool: '{tool_name}' with args: {kwargs}")
+            start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+                latency = time.time() - start_time
+                logger.info(f"AI Agent tool '{tool_name}' completed in {latency:.3f}s")
+                return result
+            except Exception as e:
+                latency = time.time() - start_time
+                logger.error(f"AI Agent tool '{tool_name}' failed in {latency:.3f}s - Error: {e}")
+                raise
+            finally:
+                tool_call_duration_seconds.labels(tool_name=tool_name).observe(time.time() - start_time)
+        return wrapper
+    return decorator
 
 
 # =============================================================================
@@ -333,6 +361,7 @@ def _rows_with_display_timestamps(column_names, rows):
 
 
 @tool
+@instrument_tool("generate_static_report")
 def generate_static_report(
     report_type: str,
     title: str,
@@ -420,11 +449,14 @@ def generate_static_report(
 
     with open(filepath, "w") as f:
         f.write(content)
+        
+    reports_generated_total.labels(report_type="static").inc()
 
     return f"reports/{filename}"
 
 
 @tool
+@instrument_tool("generate_dynamic_report")
 def generate_dynamic_report(title: str, content: str) -> str:
     """
     Save a free-form Markdown report to a file.
@@ -456,6 +488,8 @@ def generate_dynamic_report(title: str, content: str) -> str:
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(f"## {title}\n\n*Generated {date_str}*\n\n{content}\n")
+        
+    reports_generated_total.labels(report_type="dynamic").inc()
 
     return f"reports/{filename}"
 
@@ -465,6 +499,7 @@ but what if the dude asks a detailed report then we might have to give it to the
 
 
 @tool
+@instrument_tool("execute_sql_query")
 def execute_sql_query(query: str) -> str:
     """
     Execute a read-only SQL query against the Vetlog SQLite database.
@@ -529,6 +564,7 @@ def execute_sql_query(query: str) -> str:
 
 
 @tool
+@instrument_tool("query_to_inline_table")
 def query_to_inline_table(query: str, title: str = "Query Results") -> str:
     """
     Execute a SELECT query and save the FULL result set as a Markdown table
@@ -634,6 +670,7 @@ def _restricted_import(name, *args, **kwargs):
 
 
 @tool
+@instrument_tool("execute_python_analytics")
 def execute_python_analytics(query: str, python_script: str) -> str:
     """
     Execute a SQLite query and pass the resulting rows to a custom Python script for analysis.

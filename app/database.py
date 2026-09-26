@@ -1,4 +1,7 @@
 from datetime import datetime, timezone
+import os
+from app.config import DATABASE_URL
+from app.metrics import raw_messages_total, raw_messages_last_captured_timestamp, raw_messages_db_size_bytes
 
 from sqlalchemy import (
     Column,
@@ -13,16 +16,32 @@ from sqlalchemy import (
 from sqlalchemy.event import api
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.sql.expression import false
+from sqlalchemy import event
+import time
 
 from app.config import DATABASE_URL
+from app.logger import logger
 
 engine = create_engine(
     DATABASE_URL,
     connect_args={
         "check_same_thread": False,
-        "timeout": 20,
+        "timeout": 30,
     },
+    pool_size=5,
+    max_overflow=10,
 )
+
+@event.listens_for(engine, "before_cursor_execute")
+def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    conn.info.setdefault('query_start_time', []).append(time.time())
+
+@event.listens_for(engine, "after_cursor_execute")
+def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    total = time.time() - conn.info['query_start_time'].pop(-1)
+    if total > 0.5:
+        logger.warning(f"SLOW QUERY DETECTED ({total:.3f}s): {statement}")
+
 SessionLocal = sessionmaker(bind=engine)
 
 
@@ -99,3 +118,30 @@ def get_session():
         raise
     finally:
         db.close()
+
+# Metrics 
+
+def _count_raw_messages() -> int:
+    db = SessionLocal()
+    try:
+        return db.query(RawMessage).count()
+    finally:
+        db.close()
+
+raw_messages_total.set_function(_count_raw_messages)
+
+def _last_captured_timestamp() -> float:
+    db = SessionLocal()
+    try:
+        latest = db.query(RawMessage.captured_at).order_by(RawMessage.captured_at.desc()).first()
+        return latest[0].timestamp() if latest else 0
+    finally:
+        db.close()
+
+raw_messages_last_captured_timestamp.set_function(_last_captured_timestamp)
+
+def _db_file_size() -> int:
+    path = DATABASE_URL.replace("sqlite:///", "")
+    return os.path.getsize(path) if os.path.exists(path) else 0
+
+raw_messages_db_size_bytes.set_function(_db_file_size)

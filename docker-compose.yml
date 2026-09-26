@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------
+  # 1. FastAPI Backend
+  # ---------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the root directory into /app so code changes reflect immediately
+      # and the vetlog.db sqlite database persists on your host machine.
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+
+  # ---------------------------------------------------------
+  # 2. React Vite Frontend
+  # ---------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+  # ---------------------------------------------------------
+  # 3. Prometheus (Metrics Brain)
+  # ---------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    depends_on:
+      - backend
+
+  # ---------------------------------------------------------
+  # 4. Node Exporter (Hardware Metrics)
+  # ---------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:latest
+    ports:
+      - "9100:9100"
+
+  # ---------------------------------------------------------
+  # 5. Grafana (Dashboard UI)
+  # ---------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+  # ---------------------------------------------------------
+  # 6. Elasticsearch (Log Database)
+  # ---------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  # ---------------------------------------------------------
+  # 7. Kibana (Log Dashboard)
+  # ---------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+  # ---------------------------------------------------------
+  # 8. Filebeat (Log Shipper)
+  # ---------------------------------------------------------
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.0
+    command: filebeat -e -strict.perms=false
+    user: root
+    volumes:
+      - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./logs:/var/log/vetlog:ro
+      # Mount Docker socket to allow Filebeat to discover and read container logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - elasticsearch
+      - kibana
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:

@@ -254,6 +254,9 @@ def get_llm_model(user_config=None):
     Returns:
         A configured LangChain chat model instance.
     """
+    from app.callbacks import LoguruCallbackHandler
+    cb = [LoguruCallbackHandler()]
+    
     if user_config:
         provider = user_config["provider"].lower()
         model_name = user_config["model"]
@@ -269,17 +272,21 @@ def get_llm_model(user_config=None):
             model_name = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud")
         if not api_key and not user_config:
             api_key = os.getenv("OLLAMA_API_KEY", "")
-        return build_ollama_model(base_url, model_name, api_key)
+        model = build_ollama_model(base_url, model_name, api_key)
+        model.callbacks = cb
+        return model
 
     if provider == "gemini":
         if not model_name:
             model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
         if not api_key and not user_config:
             api_key = os.getenv("GOOGLE_API_KEY", "")
-        return build_gemini_model(
+        model = build_gemini_model(
             api_key=api_key,
             model_name=model_name,
         )
+        model.callbacks = cb
+        return model
 
     # For all other OpenAI-compatible providers
     env_prefixes = {
@@ -310,11 +317,13 @@ def get_llm_model(user_config=None):
     else:
         resolved_provider = "openai"
 
-    return build_openai_compatible_model(
+    model = build_openai_compatible_model(
         provider=resolved_provider,
         api_key=api_key,
         model_name=model_name,
     )
+    model.callbacks = cb
+    return model
 
 
 def initialize_agent(user_config=None):

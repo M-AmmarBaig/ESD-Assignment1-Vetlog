@@ -8,11 +8,21 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
+import time
+from app.metrics import (
+    chat_requests_total, 
+    chat_request_duration_seconds, 
+    chat_active_sse_connections,
+    chat_errors_total,
+    agent_tokens_total,
+    agent_cost_usd_total
+)
 from app.agent import get_current_agent, get_llm_model, initialize_agent
 from app.config import INPUT_TOKEN_PRICE_PER_1K, OUTPUT_TOKEN_PRICE_PER_1K
 from app.crypto import decrypt_api_key
 from app.database import ConversationLog, UserSetting
 from app.schemas import AgentStep, ChatRequest, ChatResponse, TokenUsage, UsageStats
+from app.logger import logger
 
 router = APIRouter(prefix="", tags=["chat"])
 
@@ -106,12 +116,12 @@ def _sanitize_user_message(message: str) -> str:
     # Second layer: check for malicious content in the remaining text
     for pattern in MALICIOUS_CONTENT_PATTERNS:
         if re.search(pattern, cleaned, re.IGNORECASE):
-            print(f"[GUARDRAIL] Malicious content pattern detected: '{pattern}'")
+            logger.warning(f"[GUARDRAIL] Malicious content pattern detected: '{pattern}'")
             return "I'm sorry, but I cannot process this request. I've detected patterns that resemble prompt injection attempts. I'm designed to help with veterinary clinic data queries — please ask me about your clinic's messages, reports, or donations."
 
     # Log injection attempts for monitoring (but still process the cleaned message)
     if injection_found:
-        print(f"[GUARDRAIL] Prompt injection pattern detected and stripped from user message.")
+        logger.warning(f"[GUARDRAIL] Prompt injection pattern detected and stripped from user message.")
 
     return cleaned
 
@@ -402,12 +412,17 @@ def extract_usage(messages: list) -> TokenUsage:
     )
 
 
-def accumulate_usage(usage: TokenUsage):
+def accumulate_usage(usage: TokenUsage, provider: str = "unknown"):
     _usage["total_requests"] += 1
     _usage["total_input_tokens"] += usage.input_tokens
     _usage["total_output_tokens"] += usage.output_tokens
     _usage["total_tokens"] += usage.total_tokens
     _usage["total_cost_usd"] += usage.cost_usd
+    
+    agent_tokens_total.labels(provider=provider, token_type="input").inc(usage.input_tokens)
+    agent_tokens_total.labels(provider=provider, token_type="output").inc(usage.output_tokens)
+    agent_cost_usd_total.labels(provider=provider).inc(usage.cost_usd)
+    
     print(
         f"[usage] req #{_usage['total_requests']} "
         f"in={usage.input_tokens} out={usage.output_tokens} "
@@ -572,71 +587,85 @@ def _get_agent_for_user(user_id: int | None, db: Session):
 
 @router.post("/chat/", response_model=ChatResponse)
 def chat_endpoint(payload: ChatRequest, db: Session = Depends(get_session)):
-    agent = _get_agent_for_user(payload.user_id, db)
-    config = {"configurable": {"thread_id": payload.thread_id}, "recursion_limit": 100}
-    result = agent.invoke({"messages": [("user", payload.message)]}, config=config)
-    messages = result["messages"]
-    last_message = messages[-1]
+    chat_requests_total.labels(stream="false").inc()
+    with chat_request_duration_seconds.labels(stream="false").time():
+        try:
+            agent = _get_agent_for_user(payload.user_id, db)
+            config = {"configurable": {"thread_id": payload.thread_id}, "recursion_limit": 100}
+            result = agent.invoke({"messages": [("user", payload.message)]}, config=config)
+            messages = result["messages"]
+            last_message = messages[-1]
 
-    response_text = extract_content(last_message)
-    usage = extract_usage(messages)
-    accumulate_usage(usage)
-    if usage:
-        usage_dump = usage.model_dump()
-    else:
-        usage_dump = None
+            response_text = extract_content(last_message)
+            usage = extract_usage(messages)
+            
+            user_settings = db.query(UserSetting).filter(UserSetting.user_id == payload.user_id).order_by(desc(UserSetting.updated_at)).first()
+            provider = user_settings.provider if user_settings else "unknown"
+            accumulate_usage(usage, provider)
+            
+            if usage:
+                usage_dump = usage.model_dump()
+            else:
+                usage_dump = None
 
-    if payload.user_id is not None:
-        thread_name = payload.message[:80]
-        report_path = find_report_path(messages)
-        table_path = find_table_path(messages)
-        turn = logging_turns(
-            db,
-            user_id=payload.user_id,
-            thread_id=payload.thread_id,
-            thread_name=thread_name,
-            role="user",
-            content=payload.message,
-        )
-        logging_turns(
-            db,
-            user_id=payload.user_id,
-            thread_id=payload.thread_id,
-            thread_name=thread_name,
-            role="assistant",
-            content=response_text,
-            report_path=report_path,
-            table_path=table_path,
-        )
-        if turn == 0:
-            try:
-                config = _get_user_config(payload.user_id, db)
-                if config:
-                    title = generate_thread_title(payload.message, response_text, config)
-                    update_thread_names(db, payload.user_id, payload.thread_id, title)
-            except Exception:
-                pass
-    _write_trace_log(
-        payload.thread_id,
-        payload.message,
-        messages,
-        usage_dump,
-    )
-    steps = extract_steps(messages)
+            if payload.user_id is not None:
+                thread_name = payload.message[:80]
+                report_path = find_report_path(messages)
+                table_path = find_table_path(messages)
+                turn = logging_turns(
+                    db,
+                    user_id=payload.user_id,
+                    thread_id=payload.thread_id,
+                    thread_name=thread_name,
+                    role="user",
+                    content=payload.message,
+                )
+                logging_turns(
+                    db,
+                    user_id=payload.user_id,
+                    thread_id=payload.thread_id,
+                    thread_name=thread_name,
+                    role="assistant",
+                    content=response_text,
+                    report_path=report_path,
+                    table_path=table_path,
+                )
+                if turn == 0:
+                    try:
+                        config_data = _get_user_config(payload.user_id, db)
+                        if config_data:
+                            title = generate_thread_title(payload.message, response_text, config_data)
+                            update_thread_names(db, payload.user_id, payload.thread_id, title)
+                    except Exception:
+                        pass
+            _write_trace_log(
+                payload.thread_id,
+                payload.message,
+                messages,
+                usage_dump,
+            )
+            steps = extract_steps(messages)
 
-    return ChatResponse(
-        response=response_text,
-        thread_id=payload.thread_id,
-        usage=usage,
-        report_path=report_path,
-        table_path=table_path,
-        steps=steps,
-    )
+            return ChatResponse(
+                response=response_text,
+                thread_id=payload.thread_id,
+                usage=usage,
+                report_path=report_path,
+                table_path=table_path,
+                steps=steps,
+            )
+        except Exception as e:
+            chat_errors_total.labels(error_type=type(e).__name__).inc()
+            raise
 
 
 @router.post("/chat/stream/")
 async def chat_stream(payload: ChatRequest, db: Session = Depends(get_session)):
     async def event_generator():
+        chat_requests_total.labels(stream="true").inc()
+        chat_active_sse_connections.inc()
+        start_time = time.time()
+        
         report_path = None
         table_path = None
         total_input = 0
@@ -645,14 +674,15 @@ async def chat_stream(payload: ChatRequest, db: Session = Depends(get_session)):
         response_text: list[str] = []
 
         try:
-            agent = _get_agent_for_user(payload.user_id, db)
-        except HTTPException as exc:
-            yield _sse({"type": "error", "message": exc.detail})
-            return
+            try:
+                agent = _get_agent_for_user(payload.user_id, db)
+            except HTTPException as exc:
+                chat_errors_total.labels(error_type=type(exc).__name__).inc()
+                yield _sse({"type": "error", "message": exc.detail})
+                return
 
-        config = {"configurable": {"thread_id": payload.thread_id}, "recursion_limit": 100}
+            config = {"configurable": {"thread_id": payload.thread_id}, "recursion_limit": 100}
 
-        try:
             async for event in agent.astream_events(
                 {"messages": [("user", payload.message)]},
                 config=config,
@@ -799,6 +829,7 @@ async def chat_stream(payload: ChatRequest, db: Session = Depends(get_session)):
                         total_output += usage_meta.get("output_tokens", 0)
 
         except Exception as exc:
+            chat_errors_total.labels(error_type=type(exc).__name__).inc()
             trace_text = "".join(response_text).strip()
             try:
                 _write_trace_from_parts(
@@ -812,6 +843,10 @@ async def chat_stream(payload: ChatRequest, db: Session = Depends(get_session)):
                 pass
             yield _sse({"type": "error", "message": str(exc)})
             return
+        finally:
+            duration = time.time() - start_time
+            chat_request_duration_seconds.labels(stream="true").observe(duration)
+            chat_active_sse_connections.dec()
 
         input_cost = (total_input / 1000) * INPUT_TOKEN_PRICE_PER_1K
         output_cost = (total_output / 1000) * OUTPUT_TOKEN_PRICE_PER_1K
@@ -821,7 +856,10 @@ async def chat_stream(payload: ChatRequest, db: Session = Depends(get_session)):
             "total_tokens": total_input + total_output,
             "cost_usd": round(input_cost + output_cost, 6),
         }
-        accumulate_usage(TokenUsage(**usage))
+        
+        user_settings = db.query(UserSetting).filter(UserSetting.user_id == payload.user_id).order_by(desc(UserSetting.updated_at)).first()
+        provider = user_settings.provider if user_settings else "unknown"
+        accumulate_usage(TokenUsage(**usage), provider)
 
         trace_text = "".join(response_text).strip()
         _write_trace_from_parts(

@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # 1. Scrape our FastAPI app metrics
+  - job_name: 'vetlog-backend'
+    static_configs:
+      - targets: ['backend:8000']
+
+  # 2. Scrape the host machine hardware metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']

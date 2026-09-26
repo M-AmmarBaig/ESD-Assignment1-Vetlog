@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.agent import reload_agent
 from app.config_manager import update_env_file
 from app.schemas import LLMConfigResponse, LLMConfigUpdate
+from app.logger import logger
 
 router = APIRouter(prefix="/config/llm", tags=["config"])
 
@@ -35,6 +36,6 @@ def set_llm_config(payload: LLMConfigUpdate):
 
     # Hot reload the global agent so it picks up the new environment variables
     reload_agent()
-    print(f"[Vetlog] Agent re-initialized with provider: {payload.provider}")
+    logger.info(f"Agent re-initialized with provider: {payload.provider}")
 
     return {"status": "success"}

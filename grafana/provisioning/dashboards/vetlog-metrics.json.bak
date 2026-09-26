@@ -1,0 +1,96 @@
+{
+  "title": "Vetlog Observability Command Center",
+  "tags": ["vetlog", "metrics"],
+  "timezone": "browser",
+  "refresh": "1s",
+  "style": "dark",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total AI Cost (USD)",
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 0 },
+      "targets": [ { "expr": "sum(agent_cost_usd_total)", "refId": "A" } ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 4 } }
+    },
+    {
+      "type": "stat",
+      "title": "Live Chat Connections (SSE)",
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 0 },
+      "targets": [ { "expr": "sum(chat_active_sse_connections)", "refId": "A" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Total DB Messages Processed",
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 0 },
+      "targets": [ { "expr": "sum(raw_messages_total)", "refId": "A" } ]
+    },
+    {
+      "type": "stat",
+      "title": "Total Reports Generated",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "targets": [ { "expr": "sum(reports_generated_total)", "refId": "A", "legendFormat": "{{report_type}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "WhatsApp Webhook Traffic (RED: Rate)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [ { "expr": "sum(rate(webhook_batches_total[$__rate_interval]))", "legendFormat": "Webhook Batches" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "WhatsApp Webhook Errors (RED: Errors)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "expr": "sum(rate(webhook_duplicates_skipped_total[$__rate_interval]))", "legendFormat": "Duplicates" },
+        { "expr": "sum(rate(webhook_commit_failures_total[$__rate_interval]))", "legendFormat": "DB Errors" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Chat Requests (RED: Rate)",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "targets": [ { "expr": "sum(rate(chat_requests_total[$__rate_interval])) by (stream)", "legendFormat": "Stream: {{stream}}" } ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Chat Latency (RED: Duration)",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(chat_request_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50 (Median) Latency" },
+        { "expr": "histogram_quantile(0.95, sum(rate(chat_request_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95 (Tail) Latency" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Chat Failures (RED: Errors)",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "targets": [ { "expr": "sum(rate(chat_errors_total[$__rate_interval])) by (error_type)", "legendFormat": "Error: {{error_type}}" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool Executions (RED: Rate)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 22 },
+      "targets": [ { "expr": "sum(rate(tool_calls_total[$__rate_interval])) by (tool_name)", "legendFormat": "{{tool_name}}" } ],
+      "fieldConfig": { 
+        "defaults": { 
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        } 
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM Token Burn (USE: Saturation)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "targets": [ { "expr": "sum(rate(agent_tokens_total[$__rate_interval])) by (token_type, provider)", "legendFormat": "{{provider}} - {{token_type}}" } ]
+    }
+  ]
+}

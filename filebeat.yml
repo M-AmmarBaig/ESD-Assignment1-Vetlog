@@ -1,0 +1,26 @@
+filebeat.inputs:
+- type: filestream
+  id: vetlog-json-logs
+  enabled: true
+  paths:
+    - /var/log/vetlog/*.jsonl
+  parsers:
+    - ndjson:
+        target: ""
+        add_error_key: true
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      hints.enabled: true
+
+setup.template.settings:
+  index.number_of_shards: 1
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  # Optional: If you want to use the default index name filebeat-%{[agent.version]}-%{+yyyy.MM.dd}
+  # we don't need to specify index, it will do it automatically.
+
+setup.kibana:
+  host: "kibana:5601"

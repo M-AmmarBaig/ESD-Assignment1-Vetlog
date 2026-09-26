@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from app.logger import logger
 from datetime import datetime
 
 from app.database import get_session, RawMessage
@@ -78,12 +79,13 @@ def ingest_batch(payload: RawMessageBatchIn, db: Session = Depends(get_session))
         seen_signatures.add(signature)
 
     inserted_count = 0
+    newly_ingested_chat_names = []
     for msg_data in payload.messages:
-        # Normalise timestamp to ISO so it matches stored format after migration
         normalized_ts = _parse_timestamp(msg_data.timestamp)
         signature = (msg_data.sender, msg_data.text, normalized_ts)
 
         if signature in seen_signatures:
+            webhook_duplicates_skipped_total.inc()
             continue
 
         new_message = RawMessage(
@@ -94,18 +96,22 @@ def ingest_batch(payload: RawMessageBatchIn, db: Session = Depends(get_session))
         )
         db.add(new_message)
 
-        # Track it locally so duplicates within the same batch are also caught.
         seen_signatures.add(signature)
+        newly_ingested_chat_names.append(msg_data.chat_name)
         inserted_count += 1
-        webhook_messages_ingested_total.labels(chat_name=msg_data.chat_name).inc()
 
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         webhook_commit_failures_total.inc()
-        print(f"Webhook: Database commit failed, rolled back: {e}")
+        logger.error(f"Webhook: Database commit failed, rolled back: {e}")
         raise HTTPException(status_code=500, detail="Database insertion failed.")
 
-    print(f"Ingested batch: {inserted_count} new messages (duplicates skipped)")
+    for chat_name in newly_ingested_chat_names:
+        webhook_messages_ingested_total.labels(chat_name=chat_name).inc()
+
+    logger.info(f"Ingested batch: {inserted_count} new messages (duplicates skipped)")
     return {"status": "received", "count": inserted_count}
+
+
